@@ -8,6 +8,41 @@ using SimilaritySearch
 using TextModel
 import KernelMethods.KMap: centroid
 
+
+function read_vocabulary(filename, binfile)
+    if !isfile(binfile)
+        words = String[]
+        vectors = DenseCosine{Float32}[]
+        
+        for (lineno, line) in enumerate(readlines(filename))
+            if lineno == 1
+                continue
+            end
+            arr = split(line)
+            push!(words, arr[1])
+            m = length(arr)
+            vec = Vector{Float32}(m - 1)
+            for i in 2:m
+                vec[i-1] = parse(Float32, arr[i])
+            end
+            push!(vectors, DenseCosine(vec))
+            
+            if (length(vectors) % 10000) == 1
+                info("advance $lineno -- #vectors: $(length(vectors))")
+            end
+        end
+
+        @save binfile words vectors
+    else
+        info("loading data from cache file $binfile")
+        @load binfile words vectors
+    end
+    
+    info("a vocabulary of $(length(words)) has loaded")
+    words, vectors
+end
+
+
 function translate_microtc(encode, filename, outname)
     open(outname, "w") do f
         for line in readlines(filename)
@@ -20,23 +55,20 @@ function translate_microtc(encode, filename, outname)
     end
 end
 
-function create_config()
+function create_config(nlist, qlist, skiplist=[])
     config = TextConfig()
     config.del_usr = true
     config.del_punc = false
     config.del_num = false
     config.del_url = true
-    config.nlist = []
-    config.qlist = [1,3]
-    config.skiplist = []
-
+    config.nlist = collect(Int, nlist)
+    config.qlist = collect(Int, qlist)
+    config.skiplist = collect(Int, skiplist)
     config
 end
 
-function create_encoder(words, centroids, codes)
+function create_encoder(config, words, centroids, codes)
     H = Dict{String,String}()
-    config = create_config()
-    
     for i in 1:length(words)
         # w = tokenize(words[i], config)
         w = words[i]
@@ -51,10 +83,10 @@ function create_encoder(words, centroids, codes)
         end
     end
     
-    function encode(text::String)
+	function encode(text::String)
         [get(H, w, w) for w in tokenize(text, config)]
     end
-
+		
     encode
 end
 
@@ -76,66 +108,42 @@ function centroid(vecs::AbstractVector{VBOW})
     u
 end
 
-function rocchio_model(train, test)
-    config = create_config()
+function rocchio_model(config, train, test; key_klass="klass", key_text="text")
     model = VectorModel(config)
-    model.filter_low = 10
+    model.filter_low = 1
     model.filter_high = 0.9
-    fit!(model, train, get_text=x -> x["text"])
+    fit!(model, train, get_text=x -> x[key_text])
     X = VBOW[]
     y = String[]
 
     info("vectorizing train")
     @time begin
         for tweet in train
-            vec = vectorize(tweet["text"], model)
+            vec = vectorize(tweet[key_text], model)
             if length(vec) > 0
                 push!(X, vec)
-                push!(y, tweet["klass"])
+                push!(y, tweet[key_klass])
             end
         end
     end
 
-    info("XXXXXXXXXXX KernelClassifier XXXXXXXXX")
-    #classifier = KernelClassifier(X, y, ensemble_size=1, space=KConfigurationSpace(distances=[() -> cosine_distance],
-    #                                                                               classifiers=[NearNeighborClassifier],
-    #                                                                               kernels=[linear_kernel, gaussian_kernel],
-    #                                                                               sampling=[(dnet, 30), (dnet, 100)]
-    #                                                                               ))
     info("computing centroids")
-    ŷ = unique(y)
-    X̂ = [centroid(X[y .== label]) for label in ŷ]
+    ŷ = unique(y)
+    X̂ = [centroid(X[y .== label]) for label in ŷ]
     index = Sequential(X̂, angle_distance)
     info("vectorizing test")
-    Xtest = VBOW[vectorize(x["text"], model) for x in test]
-    ytest = String[x["klass"] for x in test]
+    Xtest = VBOW[vectorize(x[key_text], model) for x in test]
+    ytest = String[x[key_klass] for x in test]
 
     info("predicting test")
     ypred = String[]
-    # ypred2 = String[]
     for (i, x) in enumerate(Xtest)
         res = search(index, x, KnnResult(1))
-        push!(ypred, ŷ[first(res).objID])
+        push!(ypred, ŷ[first(res).objID])
     end
 
-    #ypred2 = predict(classifier, Xtest)
     @show accuracy(ytest, ypred), f1(ytest, ypred, weight=:macro)
-    # @show accuracy(ytest, ypred2), f1(ytest, ypred2, weight=:macro)
 end
-
-function search_model(encode, corpus)
-    y = [tweet["klass"] for tweet in corpus]
-    config = create_config()
-    model = VectorModel(config)
-    fit!(model, corpus, get_text=x -> x["text"])
-    X = [vectorize(tweet["text"], model) for tweet in corpus]
-    classifier = KernelClassifier(X, y, ensemble_size=5, space=KConfigurationSpace(distances=[() -> angle_distance],
-                                                                                   classifiers=[NearNeighborClassifier],
-                                                                                   kernels=[linear_kernel, gaussian_kernel],
-                                                                                   sampling=[(dnet, 30), (dnet, 100)]
-                                                                                   ))
-end
-
 
 function create_codebook()
     numcenters = parse(Int, get(ENV, "numcenters", "10000"))
@@ -147,72 +155,44 @@ function create_codebook()
     @assert (kind in ("random", "fft", "dnet")) "kind=random|fft|dnet; specifies the algorithm to compute the codebook"
     vecfile=get(ENV, "vectors", "")
     @assert (length(vecfile) > 0) "vectors=file; the embedding file is mandatory"
-
-    if kind == "random"
-        s = "random.maxiter=$maxiter.tol=$tol"
-    else
-        s = kind
-    end
-    output = "model.$(basename(vecfile)).kind=$s.centers=$numcenters.k=$k"
-
-    if !isdir(output)
-        mkdir(output)
-    end
+    modelname=get(ENV, "model", "")
+    @assert (length(modelname) > 0) "model=outfile"
+    recall=parse(Float64, get(ENV, "recall", "0.9"))
     
-    clustername = joinpath(output, "cluster.jld2")
-    if !isfile(clustername)
-        # @load clustername words centroids codes
-        # else
-        words, X = read_vocabulary(vecfile, vecfile * ".jld2")
-        centroids, codes = compute_cluster(X, numcenters, k, kind, maxiter=maxiter, tol=tol)
-        @save clustername words centroids codes
-    end
-end
-
-
-function show_help()
-    println("""
-
-usage: arg1=val1 arg2=val2 ... julia run.jl inputfiles...
-
-arguments:
-
-action=train|codebook
-
-For codebook:
-numcenters=medium to large integer
-k=small integer
-maxiter=maybe a small integer
-tol=a small floating point (tolerance to conversion)
-kind=random|fft|dnet
-vectors=embedding file
-
-""")
-    
+    words, X = read_vocabulary(vecfile, vecfile * ".jld2")
+    centroids, codes = compute_cluster(X, numcenters, k, kind, maxiter=maxiter, tol=tol, recall=recall)
+    @save modelname words centroids codes
 end
 
 if !isinteractive()
-    action = get(ENV, "action", "help")
-    if action == "help"
-        show_help()
-    elseif action == "codebook"
+    action = get(ENV, "action", "")
+
+    if action == "model"
         create_codebook()
-    elseif action == "train"
+    elseif action == "translate"
         modelname=get(ENV, "model", "")
         @assert (length(modelname) > 0) "argument model=modelfile is mandatory"
         @load modelname words centroids codes
-        encode = create_encoder(words, centroids, codes)
+        config = create_config([1], [])
+        encode = create_encoder(config, words, centroids, codes)
         info("encoding $ARGS")
-        train = encode_corpus(encode, [JSON.parse(line) for line in readlines(ARGS[1])])
-        test = encode_corpus(encode, [JSON.parse(line) for line in readlines(ARGS[2])])
-
-        #train = [JSON.parse(line) for line in readlines(ARGS[1])]
-        #test = [JSON.parse(line) for line in readlines(ARGS[2])]
-        # search_model(encode, [JSON.parse(line) for line in readlines(arg)])
-        info("training on $modelname")
-        rocchio_model(train, test)
+        
+        for arg in ARGS
+            outname = replace(modelname, ".jld2", "") * "." * basename(arg)
+            f = open(outname, "w")
+            for tweet in encode_corpus(encode, [JSON.parse(line) for line in readlines(arg)])
+                println(f, JSON.json(tweet))
+            end
+            close(f)
+        end
+    elseif action == "evaluate"
+        config = create_config([1], [3, 5])
+        train = [JSON.parse(line) for line in readlines(ARGS[1])]
+        test = [JSON.parse(line) for line in readlines(ARGS[2])]
+		key_klass = get(ENV, "klass", "klass")
+		key_text = get(ENV, "text", "text")
+        rocchio_model(config, train, test, key_klass=key_klass, key_text=key_text)
     else
-        show_help()
         exit(1)
     end
 

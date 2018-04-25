@@ -4,6 +4,12 @@ using NearNeighborGraph
 
 export codebook
 
+"""
+Creates a sampling of the dataset with a densitynet-like algorithm
+
+Selects a random items from ``X`` and then removes its ``k`` nearest neighbors from ``X``.
+Repeats the procedure until ``X`` becomes empty.
+"""
 function dnetcodebook(X::AbstractVector{DenseCosine{Float32}}, numcenters, k)
     n = length(X)
     rlist = Int[]
@@ -20,13 +26,11 @@ function dnetcodebook(X::AbstractVector{DenseCosine{Float32}}, numcenters, k)
     end
 
     dnet(callback, X, CosineDistance(), ceil(Int, n / numcenters) |> Int)
-
     sort!(rlist)
     XX = X[rlist]
     H = Dict(r => i for (i, r) in enumerate(rlist))
-    # codes = [[H[first(xcodes[i]).objID]] for i in 1:n]
-    codes = [[H[p.objID] for p in xcodes[i]] for i in 1:n]
 
+    codes = [[H[p.objID] for p in xcodes[i]] for i in 1:n]
     info("creating inverted index")
     invindex = [Int[] for i in 1:length(rlist)]
     for (objID, plist) in enumerate(codes)
@@ -50,6 +54,11 @@ function dnetcodebook(X::AbstractVector{DenseCosine{Float32}}, numcenters, k)
 end
 
 
+"""
+Creates a sampling of the dataset using the farthest first algorithm
+(an approximation of the kcenter problem)
+
+"""
 function fftcodebook(X::AbstractVector{DenseCosine{Float32}}, numcenters, k)
     n = length(X)
     rlist = Int[]
@@ -63,24 +72,32 @@ function fftcodebook(X::AbstractVector{DenseCosine{Float32}}, numcenters, k)
     function callbackdist(pivID, objID, d)
         push!(xcodes[objID], pivID, d)
     end
+    
     fftraversal(callback, X, CosineDistance(), size_criterion(numcenters), callbackdist)
     sort!(rlist)
-    centers = X[rlist]
-    H = Dict(r => i for (i, r) in enumerate(rlist))
-    codes = [[H[p.objID] for p in xcodes[i]] for i in 1:n]
-    centers, codes, rlist
+    X[rlist]
+    # centers = X[rlist]
+    # H = Dict(r => i for (i, r) in enumerate(rlist))
+    # codes = [[H[p.objID] for p in xcodes[i]] for i in 1:n]
+    # centers, codes, rlist
 end
 
-function create_index(db)
+
+"""
+Creates an nearest neighbor index to speedup `codebook`
+"""
+function create_index(db; recall=0.9)
     dist = CosineDistance()
-    # I = Sequential(db, dist)
     N = LogSatNeighborhood()
     I = LocalSearchIndex(DenseCosine{Float32}, dist, search=BeamSearch(), neighborhood=N)
     fit!(I, db)
-    NearNeighborGraph.optimize!(I, 0.9)
+    NearNeighborGraph.optimize!(I, recall)
     I
 end
 
+"""
+Computes the centroid of a colletion of `DenseCosine` vectors
+"""
 function centroid(vecs::AbstractVector{DenseCosine{Float32}})
     m = length(vecs[1].vec)
     w = zeros(Float32, m)
@@ -95,7 +112,11 @@ function centroid(vecs::AbstractVector{DenseCosine{Float32}})
     DenseCosine(w)
 end
 
-function codebook(X::AbstractVector{DenseCosine{Float32}}, numcenters, k; maxiter=10, tol=0.001)
+"""
+Computes a clustering based on random sampling and an approximate nearest neighbor index, the procedure is iterative like the kmeans algorithm but instead of use the nearest neighbor `codebook` uses `k` nearest neighbors to converge and an approximate nn algorithm.
+
+"""
+function codebook(X::AbstractVector{DenseCosine{Float32}}, numcenters, k; maxiter=10, tol=0.001, recall=0.9)
     n = length(X)
     rlist = rand(1:n, numcenters) |> Set |> collect   # initial selection
     _empty = Int[]
@@ -107,7 +128,7 @@ function codebook(X::AbstractVector{DenseCosine{Float32}}, numcenters, k; maxite
     mutex = Threads.Mutex()
     while iter < maxiter && abs(scores[end-1] - scores[end]) > tol
         iter += 1
-        I = create_index(C)
+        I = create_index(C, recall=recall)
         info("\n******** computing all $k nearest references; iteration: $iter; score: $scores ********\n")
         Threads.@threads for objID in 1:n
             # for objID in 1:n

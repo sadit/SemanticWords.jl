@@ -1,0 +1,58 @@
+#!/bin/bash
+
+export JULIA_NUM_THREADS=16
+export JULIA_LOAD_PATH=..
+
+action=$1
+shift
+
+case $action in
+model)
+    numcenters=${numcenters:=10000}
+    vectors=$1
+    shift
+    model=$1
+    shift
+    [ -z $model ] && echo "the model name is mandatory, execute '$0 help' for more usage examples" && exit 1
+    path=$(dirname $model)
+    if [ ! -d $path ]
+    then
+        mkdir -p $path
+        [ $? != 0 ] && echo "an error occurred while creating '$path'" && exit 1
+    fi
+    tol=${tol:=0.001}
+    maxiter=${maxiter:=10}
+    kind=${kind:=random}
+    recall=${recall:=0.9}
+    #action=model kind=$kind maxiter=$maxiter tol=$tol numcenters=$numcenters vectors=$vectors model=$model julia SemanticWords.jl/run.jl "$@"
+    action=model kind=$kind maxiter=$maxiter tol=$tol numcenters=$numcenters vectors=$vectors model=$model julia run.jl "$@"
+    ;;
+
+trans*)
+    model=$1
+    shift
+    action=translate model=$model julia run.jl "$@"
+    ;;
+
+eval*)
+	klass=${klass:=klass}
+	text=${text:=text}
+    action=evaluate klass=$klass text=$text julia run.jl "$@"
+    ;;
+help|*)
+    echo "$0 is a collection of text utilities to approach semantic classification"
+    echo "usage: $0 command arguments"
+    echo ""
+    echo "commands:"
+    echo ""
+    echo "usage: $0 model word-embedding-file.txt output-model.jld2"
+    echo "   Creates a semantic words model from a pre-computed word embedding"
+    echo ""
+    echo "usage: $0 trans[late] model-file.jld2 file1.json [file2.json ...]"
+    echo "   Translates input files into the semantic-words format"
+    echo ""
+    echo "usage: $0 eval[uate] model-file.jld2 train.json test.json"
+    echo "   Evaluates a train-test pair of files using a Rocchio classifier"
+    echo ""
+    ;;
+esac
