@@ -114,10 +114,10 @@ function create_encoder(config, words, centroids, codes)
     encode
 end
 
-function encode_corpus(encode::Function, corpus)
+function encode_corpus(encode::Function, corpus, key_text)
     for tweet in corpus
-        tweet["original-text"] = tweet["text"]
-        tweet["text"] = join(encode(tweet["text"]), ' ')
+        tweet["original-text"] = tweet[key_text]
+        tweet[key_text] = join(encode(tweet[key_text]), ' ')
     end
 
     corpus
@@ -201,7 +201,7 @@ function create_codebook()
     modelname=get(ENV, "model", "")
     @assert (length(modelname) > 0) "model=outfile"
     recall=parse(Float64, get(ENV, "recall", "0.9"))
-    
+    @show numcenters, k, kind, recall, maxiter, tol, vecfile
     words, X = read_vocabulary(vecfile, vecfile * ".jld2")
     centroids, codes = compute_cluster(X, numcenters, k, kind, maxiter=maxiter, tol=tol, recall=recall)
     @save modelname words centroids codes
@@ -219,11 +219,12 @@ function main()
         config = create_config([1], [])
         encode = create_encoder(config, words, centroids, codes)
         info("encoding $ARGS")
-        
+        key_text = get(ENV, "text", "text")
+        @show modelname, key_text, ARGS
         for arg in ARGS
             outname = replace(modelname, ".jld2", "") * "." * basename(arg)
             f = open(outname, "w")
-            for tweet in encode_corpus(encode, [JSON.parse(line) for line in readlines(arg)])
+            for tweet in encode_corpus(encode, [JSON.parse(line) for line in readlines(arg)], key_text)
                 println(f, JSON.json(tweet))
             end
             close(f)
@@ -246,7 +247,7 @@ function main()
             model = EntModel(model, 3)
         else
             vmodel = VectorModel(config)
-            vmodel.filter_low = 2
+            vmodel.filter_low = 3
             vmodel.filter_high = 1.0
             TextModel.fit!(vmodel, X)
             if weighting == "tfidf"
