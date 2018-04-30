@@ -112,6 +112,7 @@ function centroid(vecs::AbstractVector{DenseCosine{Float32}})
     DenseCosine(w)
 end
 
+
 """
 Computes a clustering based on random sampling and an approximate nearest neighbor index, the procedure is iterative like the kmeans algorithm but instead of use the nearest neighbor `codebook` uses `k` nearest neighbors to converge and an approximate nn algorithm.
 
@@ -159,7 +160,7 @@ function codebook(X::AbstractVector{DenseCosine{Float32}}, numcenters, k; maxite
         Threads.@threads for i in 1:length(invindex)
             plist = invindex[i]
             if length(plist) > 0  # C[i] can be empty because we could be using approximate search
-                C[i] = centroid(@view X[plist])
+                C[i] = centroid(X[plist])
             end
         end
     end

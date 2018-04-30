@@ -1,58 +1,116 @@
 #!/bin/bash
 
-export JULIA_NUM_THREADS=16
-export JULIA_LOAD_PATH=..
+path=`dirname $(readlink -f $0)`
+export JULIA_NUM_THREADS=8
+export JULIA_LOAD_PATH=$path/..
 
 action=$1
 shift
 
 case $action in
 model)
-    numcenters=${numcenters:=10000}
+    numcenters=${numcenters:=1000}
     vectors=$1
     shift
     model=$1
     shift
     [ -z $model ] && echo "the model name is mandatory, execute '$0 help' for more usage examples" && exit 1
-    path=$(dirname $model)
-    if [ ! -d $path ]
+    modeldir=$(dirname $model)
+    if [ ! -d $modeldir ]
     then
-        mkdir -p $path
-        [ $? != 0 ] && echo "an error occurred while creating '$path'" && exit 1
+        mkdir -p $modeldir
+        [ $? != 0 ] && echo "an error occurred while creating '$modeldir'" && exit 1
     fi
+	k=${k:=7}
     tol=${tol:=0.001}
     maxiter=${maxiter:=10}
     kind=${kind:=random}
     recall=${recall:=0.9}
-    #action=model kind=$kind maxiter=$maxiter tol=$tol numcenters=$numcenters vectors=$vectors model=$model julia SemanticWords.jl/run.jl "$@"
-    action=model kind=$kind maxiter=$maxiter tol=$tol numcenters=$numcenters vectors=$vectors model=$model julia run.jl "$@"
+    action=model k=$k kind=$kind maxiter=$maxiter tol=$tol numcenters=$numcenters vectors=$vectors model=$model recall=$recall julia "$path/run.jl" "$@"
     ;;
 
 trans*)
     model=$1
     shift
-    action=translate model=$model julia run.jl "$@"
+    klass=${klass:=klass} text=${text:=text} action=translate model=$model julia "$path/run.jl" "$@"
     ;;
 
-eval*)
+eval*)	
+    action=evaluate qlist=${qlist:=1,3,5} nlist=${nlist:=1} klass=${klass:=klass} text=${text:=text} weighting=${weighting:=tfidf} julia "$path/run.jl" "$@"
+    ;;
+semeval|semantic-evaluation)
+    embeddings=$1
+    train=$2
+    test=$3
+    k=${k:=3}
+    recall=${recall=0.9}
+    tol=${tol:=0.001}
+    maxiter=${maxiter:=10}
+    numcenters=${numcenters:=10000}
+    weighting=${weighting:=tfidf}
+    p="model.sem.$(basename $embeddings).centers=$numcenters.k=$k.recall=$recall.tol=$tol.maxiter=$maxiter/model"
+    modeltrain="$p.$(basename $train)"
+    modeltest="$p.$(basename $test)"
+    model="$p.jld2"
+    
+    [ -z $train -o ! -f $train ] && echo "ERROR missing training file, see usage modes with '$0 help'" && exit 1
+    [ -z $test -o ! -f $test ] && echo "ERROR missing test file, see usage modes with '$0 help'" && exit 1
+
+    if [ ! -f $model ]; then
+        tol=$tol maxiter=$maxiter numcenters=$numcenters recall=$recall k=$k $0 model "$embeddings" "$model"
+        [ $? != 0 ] && echo "An error occurred while creating '$model' file from '$embeddings' file" && exit 1
+    fi
+    
+    text=${text:=text} $0 translate "$model" "$train" "$test"
+    [ $? != 0 ] && echo "An error occurred while translating '$train' and '$test' files" && exit 1
+    
+    qlist=${qlist:=1,3,5} nlist=${nlist:=1}
+    results="$modeltest.text=$text.klass=$klass.qlist=$qlist.nlist=$nlist.weighting=$weighting.results"
+    qlist=$qlist nlist=$nlist text=${text:=text} klass=${klass:=klass} weighting=$weighting $0 eval "$modeltrain" "$modeltest" > "$results"
+    [ $? != 0 ] && echo "An error occurred while evaluating '$modeltrain' and '$modeltest' files and saving results to '$results'" && exit 1
+    python -mjson.tool "$results"
+    ;;
+index|idx)
 	klass=${klass:=klass}
 	text=${text:=text}
-    action=evaluate klass=$klass text=$text julia run.jl "$@"
-    ;;
+	action=index klass=$klass text=$text julia "$path/run.jl" "$@"
+	;;
 help|*)
     echo "$0 is a collection of text utilities to approach semantic classification"
-    echo "usage: $0 command arguments"
+    echo "usage: env1=val1 env2=val2  $0 command arg1 arg2..."
     echo ""
     echo "commands:"
     echo ""
-    echo "usage: $0 model word-embedding-file.txt output-model.jld2"
+    echo "usage: $0 model word-embedding.txt output-model.jld2"
     echo "   Creates a semantic words model from a pre-computed word embedding"
+    echo "   Arguments as environment variables:"
+    echo "   numcenters=int: the number of centers in the model"
+    echo "   k=int: the number of near centers to be used by the model"
+    echo "   tol=int: the tolerance in the convergence"
+    echo "   maxiter=int: the maximum number of iterations to accept convergence"
+    echo "   kind=random|fft|dnet: the kind of clustering/grouping algorithm to use;"
+    echo "       defaults to 'random' which is not really a random clustering [TODO put a proper name]"
+    echo "   recall=float[0-1]: for the 'random' clustering it controls the 'recall' of the internal"
+    echo "       searching algorithm, please not that bigger is not always better and it is always time expensive"
     echo ""
+    
     echo "usage: $0 trans[late] model-file.jld2 file1.json [file2.json ...]"
     echo "   Translates input files into the semantic-words format"
+    echo "   klass=string: the name of the keyword containing the class name"
+    echo "   text=string: the name of the keyword containing the content text"
     echo ""
+    
     echo "usage: $0 eval[uate] model-file.jld2 train.json test.json"
     echo "   Evaluates a train-test pair of files using a Rocchio classifier"
+    echo "   klass=string: the name of the keyword containing the class name"
+    echo "   text=string: the name of the keyword containing the content text"
+    echo "   qlist=int[,int...]: a list of comma separated q-gram tokenizers"
+    echo "   nlist=int[,int...]: a list of comma separated n-gram tokenizers"
+    echo "   weighting=entropy|freq|tf|idf|tfidf"
     echo ""
+    
+    echo "usage: $0 semeval word-embedding.txt train.json test.json"
+    echo "   Runs a full pipeline of modelling, translating, and evaluating over the given arguments"
+    echo "   most of the involved commands receive arguments, and 'semeval' action also receives and propagate them"
     ;;
 esac
