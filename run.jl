@@ -209,7 +209,16 @@ end
 
 function main()
     action = get(ENV, "action", "")
-
+    key_klass = get(ENV, "klass", "klass")
+    key_text = get(ENV, "text", "text")
+    weighting = get(ENV, "weighting", "tfidf")
+    @assert (weighting in ["tfidf", "tf", "idf", "freq", "entropy"]) "unknown weighting scheme $weighting"
+    nlist = [parse(Int, i) for i in split(get(ENV, "nlist", "1"), ',') if length(i) > 0]
+    qlist = [parse(Int, i) for i in split(get(ENV, "qlist", "1,3,5"), ',') if length(i) > 0]
+    filter_low = parse(Int, get(ENV, "filter_low", "1"))
+    filter_high = parse(Float64, get(ENV, "filter_high", "1.0"))
+         
+                            
     if action == "model"
         create_codebook()
     elseif action == "translate"
@@ -232,12 +241,7 @@ function main()
     elseif action == "evaluate"
         train = [JSON.parse(line) for line in readlines(ARGS[1])]
         test = [JSON.parse(line) for line in readlines(ARGS[2])]
-		key_klass = get(ENV, "klass", "klass")
-		key_text = get(ENV, "text", "text")
-        weighting = get(ENV, "weighting", "tfidf")
-        @assert (weighting in ["tfidf", "tf", "idf", "freq", "entropy"]) "unknown weighting scheme $weighting"
-        nlist = [parse(Int, i) for i in split(get(ENV, "nlist", "1"), ',') if length(i) > 0]
-        qlist = [parse(Int, i) for i in split(get(ENV, "qlist", "1,3,5"), ',') if length(i) > 0]
+
 		config = create_config(nlist, qlist)
         X = [item[key_text] for item in train]
         if weighting == "entropy"
@@ -247,8 +251,8 @@ function main()
             model = EntModel(model, 3)
         else
             vmodel = VectorModel(config)
-            vmodel.filter_low = 3
-            vmodel.filter_high = 1.0
+            vmodel.filter_low = filter_low
+            vmodel.filter_high = filter_high
             TextModel.fit!(vmodel, X)
             if weighting == "tfidf"
                 model = TfidfModel(vmodel)
@@ -265,17 +269,15 @@ function main()
 	elseif action == "index"
 		filename = ARGS[1]
 		indexname = replace(filename, ".json", "") * ".index.jld2"
-		key_klass = get(ENV, "klass", "klass")
-		key_text = get(ENV, "text", "text")
 		if isfile(indexname)
 			info("loading index from $indexname")
 			@load indexname train model nns
 		else
 			train = [JSON.parse(line) for line in readlines(filename)]
-			config = create_config([1], [4])
+			config = create_config(nlist, qlist)
 			model = VectorModel(config)
-			model.filter_low = 1
-			model.filter_high = 1.0
+			model.filter_low = filter_low
+			model.filter_high = filter_high
 			TextModel.fit!(model, train, get_text=x -> x[key_text])
 			X, y = vectorize_collection(model, train, key_klass, key_text, false)
 			N = LogSatNeighborhood()
