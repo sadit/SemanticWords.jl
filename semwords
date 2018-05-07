@@ -1,7 +1,7 @@
 #!/bin/bash
 
 path=`dirname $(readlink -f $0)`
-export JULIA_NUM_THREADS=8
+export JULIA_NUM_THREADS=${JULIA_NUM_THREADS:=16}
 export JULIA_LOAD_PATH=$path/..
 
 action=$1
@@ -11,6 +11,7 @@ k=${k:=3}
 tol=${tol:=0.001}
 maxiter=${maxiter:=10}
 kind=${kind:=random}
+vformat=${vformat:=dense}
 recall=${recall:=0.9}
 numcenters=${numcenters:=10000}
 weighting=${weighting:=tfidf}
@@ -20,7 +21,8 @@ text=${text:=text}
 qlist=${qlist:=1,3,5}
 nlist=${nlist:=1}
 filter_low=${filter_low:=1}
-filter_nigh=${filter_nigh:=1.0}
+filter_high=${filter_high:=1.0}
+
 case $action in
 model)
     numcenters=${numcenters:=1000}
@@ -36,7 +38,7 @@ model)
         [ $? != 0 ] && echo "an error occurred while creating '$modeldir'" && exit 1
     fi
 
-    action=model k=$k kind=$kind maxiter=$maxiter tol=$tol numcenters=$numcenters vectors=$vectors model=$model recall=$recall julia "$path/run.jl" "$@"
+    action=model k=$k kind=$kind vformat=$vformat maxiter=$maxiter tol=$tol numcenters=$numcenters vectors=$vectors model=$model recall=$recall julia "$path/run.jl" "$@"
     ;;
 
 trans*)
@@ -46,7 +48,10 @@ trans*)
     ;;
 
 eval*)	
-    action=evaluate qlist=$qlist nlist=$nlist klass=$klass text=$text weighting=$weighting julia "$path/run.jl" "$@"
+    action=evaluate qlist=$qlist nlist=$nlist klass=$klass text=$text weighting=$weighting filter_low=${filter_low} filter_high=${filter_high} julia "$path/run.jl" "$@"
+    ;;
+semvoc|semantic-vocabulary)
+    action=semantic-vocabulary qlist=$qlist nlist=$nlist text=$text weighting=$weighting filter_low=${filter_low} filter_high=${filter_high} julia "$path/run.jl" "$@"
     ;;
 semeval|semantic-evaluation)
     embeddings=$1
@@ -68,9 +73,8 @@ semeval|semantic-evaluation)
     
     text=${text:=text} $0 translate "$model" "$train" "$test"
     [ $? != 0 ] && echo "An error occurred while translating '$train' and '$test' files" && exit 1
-    
-    results="$modeltest.text=$text.klass=$klass.qlist=$qlist.nlist=$nlist.weighting=$weighting.filter_low=${filter_row}.filter_high=${filter_high}.results"
-    qlist=$qlist nlist=$nlist text=$text klass=$klass weighting=$weighting $0 eval "$modeltrain" "$modeltest" > "$results"
+    results="$modeltest.text=$text.klass=$klass.qlist=$qlist.nlist=$nlist.weighting=$weighting.filter_low=${filter_low}.filter_high=${filter_high}.results"
+    qlist=$qlist nlist=$nlist text=$text klass=$klass weighting=$weighting filter_low=${filter_low} filter_high=${filter_high} $0 eval "$modeltrain" "$modeltest" > "$results"
     [ $? != 0 ] && echo "An error occurred while evaluating '$modeltrain' and '$modeltest' files and saving results to '$results'" && exit 1
     python -mjson.tool "$results"
     ;;
@@ -105,6 +109,16 @@ help|*)
     echo "usage: $0 eval[uate] model-file.jld2 train.json test.json"
     echo "   Evaluates a train-test pair of files using a Rocchio classifier"
     echo "   klass=string: the name of the keyword containing the class name"
+    echo "   text=string: the name of the keyword containing the content text"
+    echo "   qlist=int[,int...]: a list of comma separated q-gram tokenizers"
+    echo "   nlist=int[,int...]: a list of comma separated n-gram tokenizers"
+    echo "   weighting=entropy|freq|tf|idf|tfidf"
+    echo "   filter_low=int: cut tokens with frequencies smaller than filter_low"
+    echo "   filter_high=float[0-1]: cut tokens with frequencies larger than MAXFREQ * filter_high"
+    echo ""
+    
+    echo "usage: $0 semvoc train.json"
+    echo "   Creates a sparse word-embedding based on the content of train.json"
     echo "   text=string: the name of the keyword containing the content text"
     echo "   qlist=int[,int...]: a list of comma separated q-gram tokenizers"
     echo "   nlist=int[,int...]: a list of comma separated n-gram tokenizers"

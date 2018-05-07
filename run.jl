@@ -9,63 +9,63 @@ using NearNeighborGraph
 using TextModel
 import KernelMethods.KMap: centroid
 
+function read_dense(filename; header=true, delim=' ')
+    words = String[]
+    vectors = DenseCosine{Float32}[]
 
-#=
-s = "aaa  0 11 v2
-sp = 0; while sp < length(s)
-       ep = findnext(s, ' ', sp+1)
-       if ep == 0
-          ep = length(s)+1
-       end
-       @show sp, ep, s[sp+1:ep-1]
-       sp = ep
-       end
-=#
-
-function read_vocabulary(filename, binfile; header=true, delim=' ')
-    if !isfile(binfile)
-        words = String[]
-        vectors = DenseCosine{Float32}[]
-        
-        for (lineno, line) in enumerate(readlines(filename))
-            if lineno == 1
-                continue
-            end
-            arr = split(line, delim)
-            push!(words, arr[1])
-            m = length(arr)
-            vec = Vector{Float32}(m - 1)
-            for i in 2:m
-                vec[i-1] = parse(Float32, arr[i])
-            end
-            push!(vectors, DenseCosine(vec))
-            
-            if (length(vectors) % 10000) == 1
-                info("advance $lineno -- #vectors: $(length(vectors))")
-            end
+    for (lineno, line) in enumerate(readlines(filename))
+        if header && lineno == 1
+            continue
         end
+        arr = split(line, delim)
+        push!(words, arr[1])
+        m = length(arr)
+        vec = Vector{Float32}(m - 1)
+        @inbounds for i in 2:m
+            vec[i-1] = parse(Float32, arr[i])
+        end
+        push!(vectors, DenseCosine(vec))
 
-        @save binfile words vectors
-    else
-        info("loading data from cache file $binfile")
-        @load binfile words vectors
+        if (length(vectors) % 50000) == 1
+            info("advance $lineno -- #vectors: $(length(vectors))")
+        end
     end
     
     info("a vocabulary of $(length(words)) has loaded")
     words, vectors
 end
 
+function read_sparse(filename; wdelim='\t', delim=' ')
+    words = String[]
+    vectors = VBOW[]
 
-function translate_microtc(encode, filename, outname)
-    open(outname, "w") do f
-        for line in readlines(filename)
-            tweet = JSON.parse(line)
-            t = tweet["text"]
-            tweet["original-text"] = t
-            tweet["text"] = join(encode(t), ' ')
-            println(f, JSON.json(tweet))
+    f = open(filename) 
+    for (lineno, line) in enumerate(readlines(filename))
+        if lineno == 1
+            config = JSON.parse(line)
+            continue
+        end
+
+        w, line = split(line, wdelim, limit=2)
+        push!(words, w)
+        arr = split(line, delim)
+        m = length(arr)
+        vec = Vector{WeightedToken}(m)
+        @inbounds for i in 1:m
+            a, b = split(arr[i], ':')
+            vec[i] = WeightedToken(parse(Int, a), parse(Float32, b))
+        end
+        
+        push!(vectors, VBOW(vec))
+
+        if (length(vectors) % 50000) == 1
+            info("advance $lineno -- #vectors: $(length(vectors))")
         end
     end
+    close(f)
+    
+    info("a vocabulary of $(length(words)) has loaded")
+    words, vectors
 end
 
 function create_config(nlist, qlist, skiplist=[])
@@ -90,13 +90,12 @@ function create_encoder(config, words, centroids, codes)
         # '!' = Char(33) => missing / unknown token
         # ' ' = Char(32) => space, token separator
         if length(w) > 0
-            sort!(codes[i])
+            #sort!(codes[i])
             # H[w[1]] = [Char(c+512) for c in codes[i]] |> join
             H[w] = [Char(c+512) for c in codes[i]] |> join
         end
     end
     
-	#function encode(text::String)
     function encode(data)::Vector{String}
         if typeof(data) <: Vector
             L = String[]
@@ -105,6 +104,7 @@ function create_encoder(config, words, centroids, codes)
                     push!(L, get(H, w, w))
                 end
             end
+            
             return L
         else
             return [get(H, w, w) for w in tokenize(data::String, config)]
@@ -121,26 +121,6 @@ function encode_corpus(encode::Function, corpus, key_text)
     end
 
     corpus
-end
-
-"""
-Computes a centroid-like sparse vector (i.e., a center under the angle distance) for a collection of sparse vectors.
-The computation destroys input array to reduce memory allocations.
-"""
-function centroid!(vecs::AbstractVector{VBOW})
-	lastpos = length(vecs)
-	while lastpos > 1
-		pos = 1
-		for i in 1:2:lastpos
-			if i < lastpos
-				vecs[pos] = vecs[i] + vecs[i+1]
-			end
-			pos += 1
-		end
-		lastpos = pos - 1
-	end
-	
-    vecs[1]
 end
 
 function vectorize_collection(model, col, key_klass, key_text, allow_zero_length)
@@ -166,7 +146,6 @@ end
 
 function rocchio_model(model, train, test; key_klass="klass", key_text="text")
     info("vectorizing train")
-	# train = rand(train, 300)
 	X, y = vectorize_collection(model, train, key_klass, key_text, false)
     
     info("computing centroids")
@@ -183,10 +162,11 @@ function rocchio_model(model, train, test; key_klass="klass", key_text="text")
         push!(ypred, ŷ[first(res).objID])
     end
 
-	_scores = scores(ytest, ypred)
-	_scores[:accuracy] = accuracy(ytest, ypred)
-	_scores
+    _scores = scores(ytest, ypred)
+    _scores[:accuracy] = accuracy(ytest, ypred)
+    _scores
 end
+
 
 function create_codebook()
     numcenters = parse(Int, get(ENV, "numcenters", "10000"))
@@ -201,10 +181,25 @@ function create_codebook()
     modelname=get(ENV, "model", "")
     @assert (length(modelname) > 0) "model=outfile"
     recall=parse(Float64, get(ENV, "recall", "0.9"))
+    
     @show numcenters, k, kind, recall, maxiter, tol, vecfile
-    words, X = read_vocabulary(vecfile, vecfile * ".jld2")
-    centroids, codes = compute_cluster(X, numcenters, k, kind, maxiter=maxiter, tol=tol, recall=recall)
-    @save modelname words centroids codes
+    cc = ApproxKDCentroids(numcenters, k, maxiter=maxiter, tol=tol, recall=recall)
+    #cc = FFTraversal(numcenters, k)
+    if get(ENV, "vformat", "dense") == "dense"
+        begin
+            words, X = read_dense(vecfile, header=false)
+            centroids, codes, rlist = codebook(cc, X)
+            # centroids = []
+            # codes = [rand(1:numcenters, k) for i in 1:length(X)]
+            @save modelname words centroids codes
+        end
+    else
+        begin
+            words, X = read_sparse(vecfile)
+            centroids, codes, rlist = codebook(cc, X)
+            @save modelname words centroids codes
+        end
+    end
 end
 
 function main()
@@ -254,6 +249,7 @@ function main()
             vmodel.filter_low = filter_low
             vmodel.filter_high = filter_high
             TextModel.fit!(vmodel, X)
+            info("vocabulary size: ", length(vmodel.W))
             if weighting == "tfidf"
                 model = TfidfModel(vmodel)
             elseif weighting == "tf"
@@ -264,8 +260,57 @@ function main()
                 model = FreqModel(vmodel)
             end
         end
+                                
         _scores = rocchio_model(model, train, test, key_klass=key_klass, key_text=key_text)
 		println(JSON.json(_scores))
+    elseif action == "semantic-vocabulary"
+        train = [JSON.parse(line) for line in readlines(ARGS[1])]
+        
+		config = create_config(nlist, qlist)
+        X = []
+        for item in train
+            for text in item[key_text]
+                push!(X, text)
+            end
+        end
+        # X = [item[key_text] for item in train]
+        if weighting == "entropy"
+            y = [item[key_klass] for item in train]
+            le = LabelEncoder(y)
+            model = DistModel(config, X, transform.(le, y))
+            model = EntModel(model, 3)
+        else
+            vmodel = VectorModel(config)
+            vmodel.filter_low = filter_low
+            vmodel.filter_high = filter_high
+            TextModel.fit!(vmodel, X)
+            info("vocabulary size: ", length(vmodel.W))
+            if weighting == "tfidf"
+                model = TfidfModel(vmodel)
+            elseif weighting == "tf"
+                model = TfModel(vmodel)
+            elseif weighting == "idf"
+                model = IdfModel(vmodel)
+            elseif weighting == "freq"
+                model = FreqModel(vmodel)
+            end
+        end
+
+        XX = [vectorize(text, model) for text in X]
+        # clear X
+        tokenmap = id2token(vmodel)
+        tX = dtranspose(XX)
+        @assert length(model.vmodel.W) == length(tX)
+        header = Dict(k => getfield(config, k) for k in fieldnames(config) if k != :normalize)
+        header[:normalize] = config.normalize != identity
+        println(JSON.json(header))
+        for (keyid, tokens) in tX
+            #info("word $keyid - $(tokenmap[keyid]): ", [(a.id, a.weight) for a in tokens])
+            if length(tokens) >= filter_low
+                println(tokenmap[keyid], "\t", join([string(a.id |> Int, ":",a.weight) for a in tokens], ' '))
+            end
+        end
+
 	elseif action == "index"
 		filename = ARGS[1]
 		indexname = replace(filename, ".json", "") * ".index.jld2"
