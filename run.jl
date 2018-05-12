@@ -7,7 +7,6 @@ using KernelMethods.Supervised
 using SimilaritySearch
 using NearNeighborGraph
 using TextModel
-import KernelMethods.KMap: centroid
 
 function read_dense(filename; header=true, delim=' ')
     words = String[]
@@ -163,10 +162,49 @@ function rocchio_model(model, train, test; key_klass="klass", key_text="text")
     end
 
     _scores = scores(ytest, ypred)
-    _scores[:accuracy] = accuracy(ytest, ypred)
     _scores
 end
 
+function knnclassifier(model, train, test; key_klass="klass", key_text="text")
+    info("*** starting kclassifier procedure ***")
+    X, y = vectorize_collection(model, train, key_klass, key_text, false)   
+    info("*** computing kclassifier ***")
+    nnc = NearNeighborClassifier(X, y, angle_distance)
+    KernelMethods.Supervised.optimize!(nnc, accuracy, folds=3)
+    info("vectorizing test")
+	Xtest, ytest = vectorize_collection(model, test, key_klass, key_text, true)
+    
+    ypred = predict(nnc, Xtest)
+    _scores = scores(ytest, ypred)
+    _scores
+end
+
+function kclassifier(model, train, test; key_klass="klass", key_text="text")
+    info("*** starting kclassifier procedure ***")
+    X, y = vectorize_collection(model, train, key_klass, key_text, false)
+    _X = VBOW[]
+    _y = Vector{typeof(y[1])}()
+    ŷ = unique(y)
+    for label in ŷ
+        info("*** computing centroids for label '$label' ***")
+        cc = ApproxKDCentroids(31, 3, maxiter=10, tol=0.001, recall=0.9)
+        centroids, codes, rlist = codebook(cc, X[y .== label])
+        append!(_X, centroids)
+        for i in 1:length(centroids)
+            push!(_y, label)
+        end
+    end
+    
+    info("*** computing kclassifier ***")
+    nnc = NearNeighborClassifier(_X, _y, angle_distance)
+    KernelMethods.Supervised.optimize!(nnc, accuracy, folds=3)
+    info("vectorizing test")
+	Xtest, ytest = vectorize_collection(model, test, key_klass, key_text, true)
+    
+    ypred = predict(nnc, Xtest)
+    _scores = scores(ytest, ypred)
+    _scores
+end
 
 function create_codebook()
     numcenters = parse(Int, get(ENV, "numcenters", "10000"))
@@ -176,11 +214,11 @@ function create_codebook()
     maxiter = parse(Int, get(ENV, "maxiter", "10"))
     tol = parse(Float64, get(ENV, "tol", "0.001"))
     @assert (kind in ("random", "fft", "dnet")) "kind=random|fft|dnet; specifies the algorithm to compute the codebook"
-    vecfile=get(ENV, "vectors", "")
+    vecfile = get(ENV, "vectors", "")
     @assert (length(vecfile) > 0) "vectors=file; the embedding file is mandatory"
-    modelname=get(ENV, "model", "")
+    modelname = get(ENV, "model", "")
     @assert (length(modelname) > 0) "model=outfile"
-    recall=parse(Float64, get(ENV, "recall", "0.9"))
+    recall = parse(Float64, get(ENV, "recall", "0.9"))
     
     @show numcenters, k, kind, recall, maxiter, tol, vecfile
     cc = ApproxKDCentroids(numcenters, k, maxiter=maxiter, tol=tol, recall=recall)
@@ -208,6 +246,7 @@ function main()
     key_text = get(ENV, "text", "text")
     weighting = get(ENV, "weighting", "tfidf")
     @assert (weighting in ["tfidf", "tf", "idf", "freq", "entropy"]) "unknown weighting scheme $weighting"
+    smoothing = parse(Int, get(ENV, "smoothing", "3"))
     nlist = [parse(Int, i) for i in split(get(ENV, "nlist", "1"), ',') if length(i) > 0]
     qlist = [parse(Int, i) for i in split(get(ENV, "qlist", "1,3,5"), ',') if length(i) > 0]
     filter_low = parse(Int, get(ENV, "filter_low", "1"))
@@ -243,7 +282,7 @@ function main()
             y = [item[key_klass] for item in train]
             le = LabelEncoder(y)
             model = DistModel(config, X, transform.(le, y))
-            model = EntModel(model, 3)
+            model = EntModel(model, smoothing)
         else
             vmodel = VectorModel(config)
             vmodel.filter_low = filter_low
@@ -261,7 +300,8 @@ function main()
             end
         end
                                 
-        _scores = rocchio_model(model, train, test, key_klass=key_klass, key_text=key_text)
+        #_scores = rocchio_model(model, train, test, key_klass=key_klass, key_text=key_text)
+        _scores = knnclassifier(model, train, test, key_klass=key_klass, key_text=key_text)
 		println(JSON.json(_scores))
     elseif action == "semantic-vocabulary"
         train = [JSON.parse(line) for line in readlines(ARGS[1])]

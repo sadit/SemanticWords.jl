@@ -1,8 +1,10 @@
 using KernelMethods.KMap: fftraversal, size_criterion, dnet
+import KernelMethods.KMap: centroid!
 using SimilaritySearch
 using NearNeighborGraph
 using TextModel
-export codebook, centroid!, FFTraversal, ApproxKDCentroids
+
+export codebook, FFTraversal, ApproxKDCentroids
 
 abstract type Clustering end
 
@@ -23,11 +25,13 @@ end
 ApproxKDCentroids(numcenters, k; maxiter=10, tol=0.001, recall=0.9) = ApproxKDCentroids(numcenters, k, maxiter, tol, recall)
 
 function create_distance(::Type{VBOW})
-    cosine_distance
+    #cosine_distance
+    angle_distance
 end
 
 function create_distance(::Type{DenseCosine{Float32}})
-    CosineDistance()
+    #CosineDistance()
+    AngleDistance()
 end
 
 function create_distance(::Type{Vector{F}}) where {F <: AbstractFloat}
@@ -42,64 +46,6 @@ function create_index(db, recall)
     index = LocalSearchIndex(T, create_distance(T), search=BeamSearch(), neighborhood=LogSatNeighborhood(), recall=recall)
     NearNeighborGraph.fit!(index, db)
     index
-end
-
-
-"""
-Computes the centroid of a collection of vectors under the Euclidean distance.
-It don't destroys the input array, however, the VBOW version does it
-"""
-function centroid!(vecs::AbstractVector{Vector{F}}) where {F <: AbstractFloat}
-    m = length(vecs[1].vec)
-    w = zeros(F, m)
-    
-    for vv in vecs
-        v::Vector{F} = vv.vec
-        @inbounds @simd for i in 1:m
-            w[i] = w[i] + v[i]
-        end
-    end
-
-    DenseCosine(w)
-end
-
-"""
-Computes the centroid of a collection of `DenseCosine` vectors.
-It don't destroys the input array, however, the VBOW version does it
-"""
-function centroid!(vecs::AbstractVector{DenseCosine{F}}) where {F <: AbstractFloat}
-    # info("** COMPUTING the centroid of $(length(vecs)) items")
-    m = length(vecs[1].vec)
-    w = zeros(F, m)
-    
-    for vv in vecs
-        v::Vector{F} = vv.vec
-        @inbounds @simd for i in 1:m
-            w[i] += v[i]
-        end
-    end
-
-    DenseCosine(w)
-end
-
-"""
-Computes a centroid-like sparse vector (i.e., a center under the angle distance) for a collection of sparse vectors.
-The computation destroys input array to reduce memory allocations.
-"""
-function centroid!(vecs::AbstractVector{VBOW})
-	lastpos = length(vecs)
-	while lastpos > 1
-		pos = 1
-		for i in 1:2:lastpos
-			if i < lastpos
-				vecs[pos] = vecs[i] + vecs[i+1]
-			end
-			pos += 1
-		end
-		lastpos = pos - 1
-	end
-	
-    vecs[1]
 end
 
 
@@ -178,7 +124,9 @@ function codebook(algo::ApproxKDCentroids, X::AbstractVector{T}) where {T <: Uni
         end
         
         info("*** computing $(algo.k) nearest references ***")
-        push!(scores, associate_centroids_and_score(algo, C, X, codes, distances))
+        s = associate_centroids_and_score(algo, C, X, codes, distances)
+
+        push!(scores, s)
         info("*** new score with $(algo.k) references: $scores ***")
     end
     
