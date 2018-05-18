@@ -17,13 +17,23 @@ function read_dense(filename; header=true, delim=' ')
             continue
         end
         arr = split(line, delim)
-        push!(words, arr[1])
         m = length(arr)
         vec = Vector{Float32}(m - 1)
         @inbounds for i in 2:m
-            vec[i-1] = parse(Float32, arr[i])
+            num = parse(Float32, arr[i])
+            isnan(num) && error("parsed NaN object in $filename, lineno: $lineno -- $line")
+            isinf(num) && error("parsed Inf object in $filename, lineno: $lineno -- $line")
+            vec[i-1] = num
         end
-        push!(vectors, DenseCosine(vec))
+        
+        try
+            v = DenseCosine(vec)
+            push!(vectors, v)
+        catch
+            info("WARNING ignoring vector with zero norm; filename: $filename, lineno: $lineno")
+            continue
+        end
+        push!(words, arr[1])
 
         if (length(vectors) % 50000) == 1
             info("advance $lineno -- #vectors: $(length(vectors))")
@@ -52,7 +62,10 @@ function read_sparse(filename; wdelim='\t', delim=' ')
         vec = Vector{WeightedToken}(m)
         @inbounds for i in 1:m
             a, b = split(arr[i], ':')
-            vec[i] = WeightedToken(parse(Int, a), parse(Float32, b))
+            num = parse(Float32, b)
+            isnan(num) && error("parsed NaN object in $filename, lineno: $lineno -- $line")
+            isinf(num) && error("parsed Inf object in $filename, lineno: $lineno -- $line")
+            vec[i] = WeightedToken(parse(Int, a), num)
         end
         
         push!(vectors, VBOW(vec))
@@ -73,6 +86,7 @@ function create_config(nlist, qlist, skiplist=[])
     config.del_punc = false
     config.del_num = false
     config.del_url = true
+    config.del_diac = false
     config.nlist = collect(Int, nlist)
     config.qlist = collect(Int, qlist)
     config.skiplist = collect(Int, skiplist)
@@ -100,7 +114,10 @@ function create_encoder(config, words, centroids, codes)
             L = String[]
             for text in data
                 for w in tokenize(text::String, config)
-                    push!(L, get(H, w, w))
+                    ww = get(H, w, "")
+                    if length(ww) > 0
+                        push!(L, w)
+                    end
                 end
             end
             
@@ -300,8 +317,8 @@ function main()
             end
         end
                                 
-        #_scores = rocchio_model(model, train, test, key_klass=key_klass, key_text=key_text)
-        _scores = knnclassifier(model, train, test, key_klass=key_klass, key_text=key_text)
+        _scores = rocchio_model(model, train, test, key_klass=key_klass, key_text=key_text)
+        #_scores = knnclassifier(model, train, test, key_klass=key_klass, key_text=key_text)
 		println(JSON.json(_scores))
     elseif action == "semantic-vocabulary"
         train = [JSON.parse(line) for line in readlines(ARGS[1])]

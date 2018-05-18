@@ -1,0 +1,129 @@
+#!/bin/bash
+
+path=`dirname $(readlink -f $0)`
+export JULIA_NUM_THREADS=${JULIA_NUM_THREADS:=16}
+export JULIA_LOAD_PATH=$path/..
+
+export action=$1
+shift
+
+export k=${k:=3}
+export tol=${tol:=0.001}
+export maxiter=${maxiter:=10}
+export kind=${kind:=random}
+export vformat=${vformat:=dense}
+export recall=${recall:=0.9}
+export numcenters=${numcenters:=10000}
+export weighting=${weighting:=tfidf}
+
+export klass=${klass:=klass}
+export text=${text:=text}
+export qlist=${qlist:=1,3,5}
+export nlist=${nlist:=1}
+export filter_low=${filter_low:=1}
+export filter_high=${filter_high:=1.0}
+
+case $action in
+model)
+    vectors=$1
+    shift
+    model=$1
+    shift
+    [ -z $model ] && echo "the model name is mandatory, execute '$0 help' for more usage examples" && exit 1
+    modeldir=$(dirname $model)
+    if [ ! -d $modeldir ]
+    then
+        mkdir -p $modeldir
+        [ $? != 0 ] && echo "an error occurred while creating '$modeldir'" && exit 1
+    fi
+
+    action=model vectors=$vectors model=$model julia "$path/run-images.jl" "$@"
+    ;;
+
+trans*)
+    model=$1
+    shift
+    model=$model julia "$path/run-images.jl" "$@"
+    ;;
+
+eval*)	
+    action=evaluate julia "$path/run-images.jl" "$@"
+    ;;
+semvoc|semantic-vocabulary)
+    action=semantic-vocabulary julia "$path/run-images.jl" "$@"
+    ;;
+semeval|semantic-evaluation)
+    train=$1
+    test=$2
+
+    p="model.sem.$(basename $train).centers=$numcenters.k=$k.recall=$recall.tol=$tol.maxiter=$maxiter/model"
+    modeltrain="$p.$(basename $train)"
+    modeltest="$p.$(basename $test)"
+    model="$p.jld2"
+    
+    [ -z $train -o ! -f $train ] && echo "ERROR missing training file, see usage modes with '$0 help'" && exit 1
+    [ -z $test -o ! -f $test ] && echo "ERROR missing test file, see usage modes with '$0 help'" && exit 1
+
+    if [ ! -f $model ]; then
+        $0 model "$train" "$model"
+        [ $? != 0 ] && echo "An error occurred while creating '$model' file from '$train' file" && exit 1
+    fi
+    
+    text=${text:=text} $0 translate "$model" "$train" "$test"
+    [ $? != 0 ] && echo "An error occurred while translating '$train' and '$test' files" && exit 1
+    results="$modeltest.text=$text.klass=$klass.qlist=$qlist.nlist=$nlist.weighting=$weighting.filter_low=${filter_low}.filter_high=${filter_high}.results"
+    $0 eval "$modeltrain" "$modeltest" > "$results"
+    [ $? != 0 ] && echo "An error occurred while evaluating '$modeltrain' and '$modeltest' files and saving results to '$results'" && exit 1
+    python -mjson.tool "$results"
+    ;;
+help|*)
+    echo "$0 is a collection of text utilities to approach semantic classification"
+    echo "usage: env1=val1 env2=val2  $0 command arg1 arg2..."
+    echo ""
+    echo "commands:"
+    echo ""
+    echo "usage: $0 model train.json output-model.jld2"
+    echo "   Creates a codebook  model from a training dataset"
+    echo "   Arguments as environment variables:"
+    echo "   numcenters=int: the number of centers in the model"
+    echo "   k=int: the number of near centers to be used by the model"
+    echo "   tol=int: the tolerance in the convergence"
+    echo "   maxiter=int: the maximum number of iterations to accept convergence"
+    echo "   kind=random|fft|dnet: the kind of clustering/grouping algorithm to use;"
+    echo "       defaults to 'random' which is not really a random clustering [TODO put a proper name]"
+    echo "   recall=float[0-1]: for the 'random' clustering it controls the 'recall' of the internal"
+    echo "       searching algorithm, please not that bigger is not always better and it is always time expensive"
+    echo ""
+    
+    echo "usage: $0 trans[late] model-file.jld2 file1.json [file2.json ...]"
+    echo "   Translates input files into the semantic-words format"
+    echo "   klass=string: the name of the keyword containing the class name"
+    echo "   text=string: the name of the keyword containing the content text"
+    echo ""
+    
+    echo "usage: $0 eval[uate] model-file.jld2 train.json test.json"
+    echo "   Evaluates a train-test pair of files using a Rocchio classifier"
+    echo "   klass=string: the name of the keyword containing the class name"
+    echo "   text=string: the name of the keyword containing the content text"
+    echo "   qlist=int[,int...]: a list of comma separated q-gram tokenizers"
+    echo "   nlist=int[,int...]: a list of comma separated n-gram tokenizers"
+    echo "   weighting=entropy|freq|tf|idf|tfidf"
+    echo "   filter_low=int: cut tokens with frequencies smaller than filter_low"
+    echo "   filter_high=float[0-1]: cut tokens with frequencies larger than MAXFREQ * filter_high"
+    echo ""
+    
+    echo "usage: $0 semvoc train.json"
+    echo "   Creates a sparse word-embedding based on the content of train.json"
+    echo "   text=string: the name of the keyword containing the content text"
+    echo "   qlist=int[,int...]: a list of comma separated q-gram tokenizers"
+    echo "   nlist=int[,int...]: a list of comma separated n-gram tokenizers"
+    echo "   weighting=entropy|freq|tf|idf|tfidf"
+    echo "   filter_low=int: cut tokens with frequencies smaller than filter_low"
+    echo "   filter_high=float[0-1]: cut tokens with frequencies larger than MAXFREQ * filter_high"
+    echo ""
+    
+    echo "usage: $0 semeval train.json test.json"
+    echo "   Runs a full pipeline of modelling, translating, and evaluating over the given arguments"
+    echo "   most of the involved commands receive arguments, and 'semeval' action also receives and propagate them"
+    ;;
+esac

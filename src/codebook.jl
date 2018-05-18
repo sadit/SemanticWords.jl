@@ -84,13 +84,13 @@ function associate_centroids_and_score(algo, C, X, codes, distances)
     Threads.@threads for objID in 1:length(X)
         res = search(index, X[objID], KnnResult(algo.k))
         codes[objID] = [p.objID for p in res]
-        distances[objID] = last(res).dist 
+        distances[objID] = last(res).dist
     end
-    
+
     mean(distances)
 end
 
-const _empty_array = []
+const _empty_int_array = Int[]
 """
 Computes a clustering based on random sampling and an approximate nearest neighbor index, the procedure is iterative like the kmeans algorithm but instead of use the nearest neighbor `codebook` uses `k` nearest neighbors to converge and an approximate nn algorithm.
 
@@ -98,12 +98,11 @@ Computes a clustering based on random sampling and an approximate nearest neighb
 function codebook(algo::ApproxKDCentroids, X::AbstractVector{T}) where {T <: Union{DenseCosine{Float32},VBOW}}
     n = length(X)
     rlist = rand(1:n, algo.numcenters) |> Set |> collect   # initial selection
-    codes = [_empty_array for i in 1:n]
+    codes = [_empty_int_array for i in 1:n]
     C = X[rlist]
     iter = 0
     distances = zeros(Float64, n)
     scores = [typemax(Float64), associate_centroids_and_score(algo, C, X, codes, distances)]
-    
     while iter < algo.maxiter && abs(scores[end-1] - scores[end]) > algo.tol
         iter += 1
         info("*** starting iteration: $iter; scores: $scores ***")
