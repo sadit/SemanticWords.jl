@@ -69,9 +69,12 @@ semeval|semantic-evaluation)
         [ $? != 0 ] && echo "An error occurred while creating '$model' file from '$train' file" && exit 1
     fi
     
-    text=${text:=text} $0 translate "$model" "$train" "$test"
+    echo "=== translating train '$train' and test '$test' with model '$model' ==="
+    $0 translate "$model" "$train" "$test"
+    
     [ $? != 0 ] && echo "An error occurred while translating '$train' and '$test' files" && exit 1
     results="$modeltest.text=$text.klass=$klass.qlist=$qlist.nlist=$nlist.weighting=$weighting.filter_low=${filter_low}.filter_high=${filter_high}.results"
+    echo "=== evaluating $results ==="
     $0 eval "$modeltrain" "$modeltest" > "$results"
     [ $? != 0 ] && echo "An error occurred while evaluating '$modeltrain' and '$modeltest' files and saving results to '$results'" && exit 1
     python -mjson.tool "$results"

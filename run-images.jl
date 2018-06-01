@@ -70,12 +70,11 @@ end
 
 
 function create_encoder(centroids, k, recall)
-    I = SemanticWords.create_index(centroids, recall)
     
     function encode(vlist::String)::String
         X = Char[]
         for v in parse_vector_list(vlist)
-            res = search(I, v, KnnResult(k))
+            res = search(centroids, v, KnnResult(k))
             for p in res
                 push!(X, Char(p.objID+33))
             end
@@ -91,7 +90,7 @@ end
 
 function encode_corpus(encode::Function, corpus, key_text)
     for tweet in corpus
-        tweet["original-text"] = tweet[key_text]
+        # tweet["original-text"] = tweet[key_text]
         tweet[key_text] = encode(tweet[key_text])  #join(encode(tweet[key_text]), ' ')
     end
 
@@ -109,7 +108,7 @@ function vectorize_collection(model, col, key_klass, key_text, allow_zero_length
 		if allow_zero_length || length(vec) > 0
 			i += 1
 			X[i] = vec
-			y[i] = tweet[key_klass]
+			y[i] = get(tweet, key_klass, "")
 		end
 	end
 	
@@ -121,26 +120,41 @@ function vectorize_collection(model, col, key_klass, key_text, allow_zero_length
 end
 
 
-function rocchio_model(model, train, test; key_klass="klass", key_text="text")
-    info("vectorizing train")
-	X, y = vectorize_collection(model, train, key_klass, key_text, false)
+function rocchio_model(rocchioname, model, gettrain, test; key_klass="klass", key_text="text")
+    if isfile(rocchioname)
+        @load rocchioname X̂ ŷ
+    else
+        info("vectorizing train")
+        X, y = vectorize_collection(model, gettrain(), key_klass, key_text, false)
+
+        info("computing centroids")
+        ŷ = unique(y)
+        X̂ = [centroid!(X[y .== label]) for label in ŷ]
+        @save rocchioname X̂ ŷ
+    end
     
-    info("computing centroids")
-    ŷ = unique(y)
-    X̂ = [centroid!(X[y .== label]) for label in ŷ]
     index = Sequential(X̂, angle_distance)
     info("vectorizing test")
 	Xtest, ytest = vectorize_collection(model, test, key_klass, key_text, true)
 
     info("predicting test")
     ypred = String[]
+    Y = []
     for (i, x) in enumerate(Xtest)
-        res = search(index, x, KnnResult(1))
-        push!(ypred, ŷ[first(res).objID])
+        res = search(index, x, KnnResult(length(ŷ)))
+        label = ŷ[first(res).objID]
+        push!(ypred, label)
+        m = test[i]
+        delete!(m, "text")
+        m[key_klass] = label
+        A = [(p.objID, p.dist) for p in res]
+        sort!(A)
+        m["decision_function"] = [a[2] for a in A]
+        push!(Y, m)
     end
 
     _scores = scores(ytest, ypred)
-    _scores
+    Y, _scores
 end
 
 
@@ -158,7 +172,7 @@ function create_codebook()
     @assert (length(modelname) > 0) "model=outfile"
     recall = parse(Float64, get(ENV, "recall", "0.9"))
     
-    @show numcenters, k, kind, recall, maxiter, tol, vecfile
+    info("creating codebook: numcenters:$numcenters, k:$k, kind:$kind, recall=$recall, maxiter=$maxiter, tol:$tol, vecfile=$vecfile")
     cc = ApproxKDCentroids(numcenters, k, maxiter=maxiter, tol=tol, recall=recall)
     
     if get(ENV, "vformat", "dense") == "dense"
@@ -166,6 +180,7 @@ function create_codebook()
             words, X = read_vectors(vecfile, "text")
             info(length(words), "--", length(X))
             centroids, codes, rlist = codebook(cc, X)
+            centroids = SemanticWords.create_index(centroids, recall)
             @save modelname words centroids codes
         end
     else
@@ -177,6 +192,7 @@ function create_codebook()
         # end
     end
 end
+
 
 function main()
     action = get(ENV, "action", "")
@@ -199,33 +215,57 @@ function main()
         @assert (length(modelname) > 0) "argument model=modelfile is mandatory"
         @load modelname words centroids codes
         encode = create_encoder(centroids, k, recall)
-        info("encoding $ARGS")
+
         key_text = get(ENV, "text", "text")
-        @show modelname, key_text, ARGS
+        info("*** translating $ARGS with model $modelname")
         for arg in ARGS
             outname = replace(modelname, ".jld2", "") * "." * basename(arg)
-            f = open(outname, "w")
-            for tweet in encode_corpus(encode, [JSON.parse(line) for line in readlines(arg)], key_text)
-                println(f, JSON.json(tweet))
+            if !isfile(outname)
+                f = open(outname, "w")
+                for tweet in encode_corpus(encode, [JSON.parse(line) for line in readlines(arg)], key_text)
+                    println(f, JSON.json(tweet))
+                end
+                close(f)
             end
-            close(f)
         end
     elseif action == "evaluate"
-        train = [JSON.parse(line) for line in readlines(ARGS[1])]
-        test = [JSON.parse(line) for line in readlines(ARGS[2])]
+        trainfile, testfile = ARGS[1], ARGS[2]
+        train = []
+        function gettrain()
+            if length(train) == 0
+                for line in readlines(trainfile)
+                    push!(train, JSON.parse(line))
+                end
+            end
+                                    
+            train
+        end
+        test = [JSON.parse(line) for line in readlines(testfile)]
 
 		config = create_config(nlist, qlist)
-        X = [item[key_text] for item in train]
+        
+        _file = trainfile * ".weighting=$(weighting).filter_low=$(filter_low).filter_high=$(filter_high).nlist=$(join(map(string, nlist), ',')).qlist=$(join(map(string, qlist), ','))"
+        rocchiofile = _file * ".rocchio.jld2"
+        vmodelfile = _file * ".vmodel.jld2"
+                                
         if weighting == "entropy"
-            y = [item[key_klass] for item in train]
+            X = [item[key_text] for item in gettrain()]
+            y = [item[key_klass] for item in gettrain()]
             le = LabelEncoder(y)
             model = DistModel(config, X, transform.(le, y))
             model = EntModel(model, smoothing)
         else
-            vmodel = VectorModel(config)
-            vmodel.filter_low = filter_low
-            vmodel.filter_high = filter_high
-            TextModel.fit!(vmodel, X)
+            if isfile(vmodelfile)
+                @load vmodelfile vmodel
+            else
+                vmodel = VectorModel(config)
+                vmodel.filter_low = filter_low
+                vmodel.filter_high = filter_high
+                X = [item[key_text] for item in gettrain()]
+                TextModel.fit!(vmodel, X)
+                @save vmodelfile vmodel
+            end
+            
             info("vocabulary size: ", length(vmodel.W))
             if weighting == "tfidf"
                 model = TfidfModel(vmodel)
@@ -237,9 +277,14 @@ function main()
                 model = FreqModel(vmodel)
             end
         end
-                                
-        _scores = rocchio_model(model, train, test, key_klass=key_klass, key_text=key_text)
-		println(JSON.json(_scores))
+        
+        Y, _scores = rocchio_model(rocchiofile, model, gettrain, test, key_klass=key_klass, key_text=key_text)
+        println(JSON.json(_scores))
+        f = open(testfile * ".predicted", "w")
+        for y in Y
+            println(f, JSON.json(y))
+        end
+        close(f)
     else
         exit(1)
     end
