@@ -43,6 +43,7 @@ Creates an nearest neighbor index to speedup `codebook`
 """
 function create_index(db, recall)
     T = typeof(db[1])
+    # return Sequential(db, create_distance(T))
     index = LocalSearchIndex(T, create_distance(T), search=BeamSearch(), neighborhood=LogSatNeighborhood(), recall=recall)
     NearNeighborGraph.fit!(index, db)
     index
@@ -103,6 +104,7 @@ function codebook(algo::ApproxKDCentroids, X::AbstractVector{T}) where {T <: Uni
     iter = 0
     distances = zeros(Float64, n)
     scores = [typemax(Float64), associate_centroids_and_score(algo, C, X, codes, distances)]
+    @assert !isnan(scores[end]) "ERROR invalid score $scores"
     while iter < algo.maxiter && abs(scores[end-1] - scores[end]) > algo.tol
         iter += 1
         info("*** starting iteration: $iter; scores: $scores ***")
@@ -126,6 +128,7 @@ function codebook(algo::ApproxKDCentroids, X::AbstractVector{T}) where {T <: Uni
         s = associate_centroids_and_score(algo, C, X, codes, distances)
 
         push!(scores, s)
+        @assert !isnan(scores[end]) "ERROR invalid score $scores"
         info("*** new score with $(algo.k) references: $scores ***")
     end
     
